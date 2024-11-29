@@ -19,8 +19,6 @@ import hashlib
 def create_user(db: Session, first_name: str, last_name: str, email: str, role: str, position: str, department: str, username: str, password: str):
     # password_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
     # print(password_hash)
-    print(password)
-    print(type(password))
     # Создаем нового пользователя
     new_user = User(
         first_name=first_name,

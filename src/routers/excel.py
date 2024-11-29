@@ -4,7 +4,7 @@ from services.excel_service import generate_excel_file
 
 router = APIRouter()
 
-@router.get("/download/excel")
+@router.get("/download", response_class=FileResponse, summary="Скачать Excel файл", description="Генерация и скачивание Excel файла с данными.")
 async def download_excel():
     file_path = generate_excel_file()
     if not file_path:

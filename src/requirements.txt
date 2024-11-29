@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+python-decouple
+jwt
+python-socketio
+pandas
+openpyxl

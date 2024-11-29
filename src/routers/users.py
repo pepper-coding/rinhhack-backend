@@ -1,27 +1,21 @@
-from fastapi import APIRouter, HTTPException
-from typing import List
-from models.user import User
+# src/routers/users.py
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from src.models.user import User  # SQLAlchemy модель
+from src.models.schemas import UserBase  # Pydantic модель
+from src.database import SessionLocal  # предполагается, что у вас есть функция для получения сессии БД
 
 router = APIRouter()
 
-fake_users_db = [
-    {"id": 1, "username": "user1", "email": "user1@example.com"},
-    {"id": 2, "username": "user2", "email": "user2@example.com"},
-]
+# Функция для получения сессии базы данных
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-@router.get("/", response_model=List[User], summary="Получить список пользователей", description="Получение всех пользователей из базы данных.")
-async def get_users():
-    """
-    Получение списка всех пользователей.
-    """
-    return fake_users_db
-
-@router.get("/{user_id}", response_model=User, summary="Получить профиль пользователя", description="Получение профиля пользователя по ID.")
-async def get_user_profile(user_id: int):
-    """
-    Получение профиля пользователя по его ID.
-    """
-    user = next((user for user in fake_users_db if user["id"] == user_id), None)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+@router.get("/users", response_model=list[UserBase])  # Используем Pydantic модель
+async def get_users(db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    return users

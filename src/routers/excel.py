@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-from services.excel_service import generate_excel_file
+from src.services.excel_service import generate_excel_file
 
 router = APIRouter()
 

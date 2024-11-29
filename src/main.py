@@ -28,5 +28,8 @@ app.include_router(auth.router, tags=["Auth"], prefix="/auth", responses={404: {
 app.include_router(users.router, tags=["Users"], prefix="/users")
 app.include_router(excel.router, tags=["Excel"], prefix="/excel")
 
-# Интеграция Socket.IO
+@app.get("/", summary="Проверка работоспособности сервера", response_description="Проверка состояния сервера")
+async def read_root():
+    return {"status": "alive"}
+
 app.mount("/ws", app_sio)

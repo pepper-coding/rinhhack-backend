@@ -19,7 +19,7 @@ from datetime import datetime
 import socketio
 import uvicorn
 from fastapi.security import OAuth2PasswordBearer
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
 from src.routers import auth, users, excel
 import base64
 import jwt
@@ -28,7 +28,10 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import threading
 import pandas as pd
+<<<<<<< HEAD
 import asyncio
+=======
+>>>>>>> feb1cbde9e1d3b4b387dd457abc459b8a1ce5f12
 
 
 load_dotenv()
@@ -42,6 +45,7 @@ REGION_NAME = os.getenv("REGION_NAME")
 ENDPOINT_URL = os.getenv("ENDPOINT_URL")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 engine = create_engine(DATABASE_URL)
+<<<<<<< HEAD
 session = boto3.session.Session(
     aws_access_key_id=AWS_ACCESS_KEY_ID,
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
@@ -52,9 +56,17 @@ session = boto3.session.Session(
 s3_client = session.client(
     service_name="s3",
     endpoint_url=ENDPOINT_URL,  # URL для Yandex Cloud S3
+=======
+s3_client = boto3.client(
+    "s3",
+    aws_access_key_id="AKIAEXAMPLEKEY123",
+    aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY123",
+    region_name="us-west-2",
+>>>>>>> feb1cbde9e1d3b4b387dd457abc459b8a1ce5f12
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
 
 # Функция для получения текущего пользователя из токена
 def get_current_user(token: str = Depends(oauth2_scheme)):
@@ -82,7 +94,7 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(
     title="API для работы с пользователями и Excel",
     description="Этот API позволяет управлять пользователями, аутентификацией через JWT, работать с Excel файлами и подключаться через WebSocket.",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 
@@ -108,7 +120,7 @@ def socketio_mount(
     logger: bool = False,
     engineio_logger: bool = False,
     cors_allowed_origins="*",
-    **kwargs
+    **kwargs,
 ) -> socketio.AsyncServer:
     """Mounts an async SocketIO app over an FastAPI app."""
     sio = socketio.AsyncServer(
@@ -116,7 +128,7 @@ def socketio_mount(
         cors_allowed_origins=cors_allowed_origins,
         logger=logger,
         engineio_logger=engineio_logger,
-        **kwargs
+        **kwargs,
     )
 
     sio_app = socketio.ASGIApp(sio, socketio_path=socketio_path)
@@ -150,6 +162,7 @@ async def send_updated_file_to_all_clients(filename, skip_sid=None):
 
 
 
+
 class FileChangeHandler(FileSystemEventHandler):
     def on_modified(self, event):
         print(f"Файл {event.src_path} изменен.")
@@ -165,6 +178,17 @@ class FileChangeHandler(FileSystemEventHandler):
         asyncio.set_event_loop(loop)
         loop.run_until_complete(send_updated_file_to_all_clients(file_path, None))
 
+<<<<<<< HEAD
+=======
+    def on_modified(self, event):
+        if not event.is_directory:
+            print(f"File modified: {event.src_path}")
+            sio.start_background_task(
+                sio.emit, "file_event", {"event": "modified", "file": event.src_path}
+            )
+
+
+>>>>>>> feb1cbde9e1d3b4b387dd457abc459b8a1ce5f12
 def start_file_watcher():
     event_handler = FileChangeHandler()
     observer = Observer()
@@ -180,6 +204,19 @@ def start_file_watcher():
 
 threading.Thread(target=start_file_watcher, daemon=True).start()
 
+<<<<<<< HEAD
+=======
+
+@app.get(
+    "/",
+    summary="Проверка состояния сервера",
+    response_description="Проверка состояния сервера",
+)
+async def read_root():
+    return {"status": "alive"}
+
+
+>>>>>>> feb1cbde9e1d3b4b387dd457abc459b8a1ce5f12
 @sio.event
 async def connect(sid, environ, filename):
     print(f"Client {sid} connected with file: {filename}")
@@ -191,12 +228,14 @@ async def connect(sid, environ, filename):
     if file_content:
         await sio.emit('file_update', {'data': encode_file(file_content), 'filename': filename}, room=sid)
 
+
 @sio.event
 async def disconnect(sid):
     print(f"Client {sid} disconnected")
     if sid in active_connections:
         del active_connections[sid]
 
+<<<<<<< HEAD
 def get_file_from_storage(filename):
     try:
         s3_client = boto3.client('s3')
@@ -244,7 +283,42 @@ async def stop_editing(sid, filename):
     active_connections[sid] = {"file": filename, "status": None}
     # После завершения редактирования отправляем обновленный файл всем остальным
     await send_updated_file_to_all_clients(filename, skip_sid=sid)
+=======
 
+@sio.event
+async def get_file(sid):
+    try:
+        with open("src/test.xlsx", "rb") as file:
+            file_content = file.read()
+            encoded_content = base64.b64encode(file_content).decode("utf-8")
+            await sio.emit("file_update", {"data": encoded_content}, room=sid)
+    except FileNotFoundError:
+        await sio.emit("error", {"message": "File not found"}, room=sid)
+
+
+@sio.event
+async def upload_file(sid, data):
+    global current_file_buffer
+    current_file_buffer = data["data"]
+    file_name = data["filename"]
+>>>>>>> feb1cbde9e1d3b4b387dd457abc459b8a1ce5f12
+
+    # Декодируем base64 данные в байты
+    file_data = base64.b64decode(current_file_buffer)
+
+    # Создаем байтовый поток для файла
+    file_stream = io.BytesIO(file_data)
+
+    # Читаем данные Excel с помощью pandas (можно также использовать openpyxl, если нужно)
+    df = pd.read_excel(file_stream)
+
+    # Сохраняем полученные данные в новый файл Excel
+    new_file_name = "modified_" + file_name
+    df.to_excel(new_file_name, index=False)
+    print(f"File saved as {new_file_name}")
+
+    # Отправляем обратно клиенту
+    # await sio.emit('file_update', {'data': current_file_buffer}, room=sid)
 
 @sio.event
 async def upload_file(sid, data):
@@ -278,6 +352,7 @@ def create_db_user(db: Session, user: UserCreate):  # Хэшируем паро�
     db.refresh(db_user)
     return db_user
 
+
 def decode_token(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
@@ -285,7 +360,13 @@ def decode_token(token: str):
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-@app.get("/me", response_model=EmployeeResponse, summary="Получить данные о текущем пользователе", description="Этот эндпоинт возвращает данные о пользователе на основе переданного JWT токена.")
+
+@app.get(
+    "/me",
+    response_model=EmployeeResponse,
+    summary="Получить данные о текущем пользователе",
+    description="Этот эндпоинт возвращает данные о пользователе на основе переданного JWT токена.",
+)
 async def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """
     Этот эндпоинт возвращает информацию о текущем пользователе, используя его токен.
@@ -301,11 +382,12 @@ async def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_
             email=user.email,
             role=user.role,
             position=user.position,
-            department=user.department
+            department=user.department,
         )
 
     raise HTTPException(status_code=404, detail="User not found")
 
+<<<<<<< HEAD
 # @app.get("/excel/excel", summary="Получение всех таблиц", tags=["Excel"])
 # async def get_all_tables(current_user: str = Depends(get_current_user)):
 #     """
@@ -340,9 +422,68 @@ async def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_
 #     Удаляет таблицу по ID.
 #     """
 #     return {"message": f"Удаление таблицы с ID {table_id}."}
+=======
 
-@app.get("/users/{user_id}", response_model=UserResponse, summary="Получить пользователя")
-def read_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
+@app.get("/excel/excel", summary="Получение всех таблиц", tags=["Excel"])
+async def get_all_tables(current_user: str = Depends(get_current_user)):
+    """
+    Возвращает список всех таблиц.
+    """
+    return {"message": "Получение всех таблиц."}
+
+
+@app.get("/excel/user", summary="История изменения", tags=["Excel"])
+async def get_all_tables(current_user: str = Depends(get_current_user)):
+    """
+    Посмотреть историю измнения файла.
+    """
+    return {
+        "message": "Последний измененный файл пользователем",
+        "username пользователя": current_user,
+        "Последний измененный файл": random.randint(0, 99),
+    }
+
+
+@app.post("/excel/", summary="Создание таблицы", tags=["Excel"])
+async def create_table(
+    request_body: dict, current_user: str = Depends(get_current_user)
+):
+    """
+    Создает новую таблицу.
+    """
+    return {"message": "Создание таблицы.", "request_body": request_body}
+
+
+@app.put("/excel/{table_id}", summary="Обновление таблицы", tags=["Excel"])
+async def update_table(
+    table_id: int, request_body: dict, current_user: str = Depends(get_current_user)
+):
+    """
+    Обновляет таблицу по ID.
+    """
+    return {
+        "message": f"Обновление таблицы с ID {table_id}.",
+        "request_body": request_body,
+    }
+
+
+@app.delete("/excel/{table_id}", summary="Удаление таблицы", tags=["Excel"])
+async def delete_table(table_id: int, current_user: str = Depends(get_current_user)):
+    """
+    Удаляет таблицу по ID.
+    """
+    return {"message": f"Удаление таблицы с ID {table_id}."}
+>>>>>>> feb1cbde9e1d3b4b387dd457abc459b8a1ce5f12
+
+
+@app.get(
+    "/users/{user_id}", response_model=UserResponse, summary="Получить пользователя"
+)
+def read_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
     db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -357,8 +498,13 @@ def read_user(user_id: int, db: Session = Depends(get_db), current_user: str = D
         department=db_user.department,
     )
 
+
 @app.post("/users/", response_model=UserResponse, summary="Создать нового пользователя")
-def create_user(user: UserCreate, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
+def create_user(
+    user: UserCreate,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
     db_user = create_db_user(db, user=user)
     return UserResponse(
         id=db_user.id,
@@ -371,8 +517,16 @@ def create_user(user: UserCreate, db: Session = Depends(get_db), current_user: s
         department=db_user.department,
     )
 
-@app.put("/users/{user_id}", response_model=UserResponse, summary="Обновить пользователя")
-def update_user(user_id: int, user: UserCreate, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
+
+@app.put(
+    "/users/{user_id}", response_model=UserResponse, summary="Обновить пользователя"
+)
+def update_user(
+    user_id: int,
+    user: UserCreate,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
     db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -395,8 +549,15 @@ def update_user(user_id: int, user: UserCreate, db: Session = Depends(get_db), c
         department=db_user.department,
     )
 
-@app.delete("/users/{user_id}", response_model=UserResponse, summary="Удалить пользователя")
-def delete_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
+
+@app.delete(
+    "/users/{user_id}", response_model=UserResponse, summary="Удалить пользователя"
+)
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
     db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")

@@ -7,10 +7,3 @@ router = APIRouter()
 
 file_buffer = None
 file_hash = None
-
-
-def calculate_file_hash(file_data: bytes) -> str:
-    """
-    Вычислить хэш для данных файла.
-    """
-    return hashlib.sha256(file_data).hexdigest()

@@ -45,7 +45,17 @@ def get_db():
 def get_users(db: Session, skip: int = 0):
     return db.query(User).offset(skip).all()
 
-@router.get("/users", response_model=list[UserResponse], summary="Получить список всех пользователей")  # Используем Pydantic модель
+@router.get("/users", response_model=list[UserResponse], summary="Получить список всех пользователей")
 def read_users(skip: int = 0, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
     users = get_users(db, skip=skip)
-    return users
+
+    return [UserResponse(**{
+    "id": user.id,
+    "firstName": user.first_name,
+    "lastName": user.last_name,
+    "username": user.username,
+    "email": user.email,
+    "role": user.role,
+    "position": user.position,
+    "department": user.department,
+}) for user in users]

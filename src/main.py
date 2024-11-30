@@ -10,6 +10,7 @@ from src.models.employee import EmployeeResponse
 from dotenv import load_dotenv
 import os
 from jose import JWTError, jwt
+import boto3
 
 from fastapi import UploadFile
 from src.models.schemas import ExcelFile, add_history_entry
@@ -30,6 +31,12 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 SECRET_KEY = os.getenv("SECRET_KEY")
 engine = create_engine(DATABASE_URL)
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id='AKIAEXAMPLEKEY123',
+    aws_secret_access_key='wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY123',
+    region_name='us-west-2'
+)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
@@ -143,7 +150,7 @@ async def file_update(sid, data):
     await sio.emit('file_update', {'data': current_file_buffer}, room=sid)
 
 
-def create_db_user(db: Session, user: UserCreate):
+def create_db_user(db: Session, user: UserCreate):  # Хэшируем пароль
     db_user = User(
         first_name=user.first_name,
         last_name=user.last_name,
@@ -152,8 +159,9 @@ def create_db_user(db: Session, user: UserCreate):
         position=user.position,
         department=user.department,
         username=user.username,
-        password_hash=user.password,
+        password_hash=user.password,  # Сохраняем хэшированный пароль
     )
+
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
@@ -209,47 +217,78 @@ async def delete_excel_table(table_name: str, db: Session = Depends(get_db), cur
 
 @app.post("/excel/upload/")
 async def upload_excel(file: UploadFile, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    content = await file.read()
-    base64_data = base64.b64encode(content).decode("utf-8")
+    try:
+        content = await file.read()  # Чтение содержимого файла как байтов
+        base64_data = base64.b64encode(content).decode("utf-8")  # Преобразование в base64 строку
 
-    new_file = ExcelFile(file_name=file.filename, file_data=base64_data, history=[{
-        "action": "created",
-        "user": current_user,
-        "timestamp": datetime.now().isoformat()
-    }])
+        new_file = ExcelFile(
+            file_name=file.filename,
+            file_data=base64_data,
+            history=[{
+                "action": "created",
+                "user": current_user,
+                "timestamp": datetime.now().isoformat()
+            }]
+        )
 
-    db.add(new_file)
-    db.commit()
-    db.refresh(new_file)
-    return {"message": "File uploaded successfully", "file_id": new_file.id}
+        db.add(new_file)
+        db.commit()
+        db.refresh(new_file)
+        return {"message": "File uploaded successfully", "file_id": new_file.id}
 
-@app.get("/excel/download/{table_name}")
-async def download_excel(table_name: str, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    # Ищем таблицу в базе данных
-    table = db.query(ExcelFile).filter(ExcelFile.file_name == table_name).first()
-    if not table:
-        return {"error": "Table not found"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error uploading file: {str(e)}")
 
-    # Декодируем содержимое таблицы из base64
-    file_content = base64.b64decode(table.file_data)
-    file_stream = io.BytesIO(file_content)
+@app.get("/excel/download/{file_name}")
+async def download_excel(file_name: str, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
+    # Ищем файл в базе данных
+    file_record = db.query(ExcelFile).filter(ExcelFile.file_name == file_name).first()
+    if not file_record:
+        raise HTTPException(status_code=404, detail="File not found")
 
-    # Возвращаем файл как ответ
-    response = StreamingResponse(file_stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    response.headers["Content-Disposition"] = f"attachment; filename={table_name}.xlsx"
-    return response
+    # Скачиваем файл с S3
+    try:
+        file_data = s3_client.get_object(Bucket="your-s3-bucket-name", Key=file_name)
+        file_content = file_data['Body'].read()
+
+        # Возвращаем файл как поток данных
+        file_stream = io.BytesIO(file_content)
+        response = StreamingResponse(file_stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response.headers["Content-Disposition"] = f"attachment; filename={file_name}"
+
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 @app.get("/users/{user_id}", response_model=UserResponse, summary="Получить пользователя")
 def read_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
     db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return db_user
+    return UserResponse(
+        id=db_user.id,
+        firstName=db_user.first_name,
+        lastName=db_user.last_name,
+        username=db_user.username,
+        email=db_user.email,
+        role=db_user.role,
+        position=db_user.position,
+        department=db_user.department,
+    )
 
 @app.post("/users/", response_model=UserResponse, summary="Создать нового пользователя")
 def create_user(user: UserCreate, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
     db_user = create_db_user(db, user=user)
-    return db_user
+    return UserResponse(
+        id=db_user.id,
+        firstName=db_user.first_name,
+        lastName=db_user.last_name,
+        username=db_user.username,
+        email=db_user.email,
+        role=db_user.role,
+        position=db_user.position,
+        department=db_user.department,
+    )
 
 @app.put("/users/{user_id}", response_model=UserResponse, summary="Обновить пользователя")
 def update_user(user_id: int, user: UserCreate, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
@@ -264,7 +303,16 @@ def update_user(user_id: int, user: UserCreate, db: Session = Depends(get_db), c
     db_user.department = user.department
     db.commit()
     db.refresh(db_user)
-    return db_user
+    return UserResponse(
+        id=db_user.id,
+        firstName=db_user.first_name,
+        lastName=db_user.last_name,
+        username=db_user.username,
+        email=db_user.email,
+        role=db_user.role,
+        position=db_user.position,
+        department=db_user.department,
+    )
 
 @app.delete("/users/{user_id}", response_model=UserResponse, summary="Удалить пользователя")
 def delete_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
@@ -273,7 +321,16 @@ def delete_user(user_id: int, db: Session = Depends(get_db), current_user: str =
         raise HTTPException(status_code=404, detail="User not found")
     db.delete(db_user)
     db.commit()
-    return db_user
+    return UserResponse(
+        id=db_user.id,
+        firstName=db_user.first_name,
+        lastName=db_user.last_name,
+        username=db_user.username,
+        email=db_user.email,
+        role=db_user.role,
+        position=db_user.position,
+        department=db_user.department,
+    )
 
 
 if __name__ == "__main__":

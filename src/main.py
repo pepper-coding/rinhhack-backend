@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import os
 from jose import JWTError, jwt
 import boto3
-
+import random
 from fastapi import UploadFile
 from src.models.schemas import ExcelFile, add_history_entry
 from datetime import datetime
@@ -23,6 +23,9 @@ from src.routers import auth, users, excel
 import base64
 import jwt
 import io
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import threading
 
 
 load_dotenv()
@@ -112,10 +115,45 @@ def socketio_mount(
 
 
 sio = socketio_mount(app)
-
+WATCH_DIRECTORY = "src/"
 
 current_file_buffer = None
 active_connections = []
+
+class FileChangeHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory:
+            print(f"File created: {event.src_path}")
+            sio.start_background_task(
+                sio.emit, "file_event", {"event": "created", "file": event.src_path}
+            )
+
+    def on_deleted(self, event):
+        if not event.is_directory:
+            print(f"File deleted: {event.src_path}")
+            sio.start_background_task(
+                sio.emit, "file_event", {"event": "deleted", "file": event.src_path}
+            )
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            print(f"File modified: {event.src_path}")
+            sio.start_background_task(
+                sio.emit, "file_event", {"event": "modified", "file": event.src_path}
+            )
+def start_file_watcher():
+    event_handler = FileChangeHandler()
+    observer = Observer()
+    observer.schedule(event_handler, WATCH_DIRECTORY, recursive=False)
+    observer.start()
+    try:
+        while True:
+            pass  # Поддерживаем процесс активным
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
+
+threading.Thread(target=start_file_watcher, daemon=True).start()
 
 @app.get("/", summary="Проверка состояния сервера", response_description="Проверка состояния сервера")
 async def read_root():
@@ -126,28 +164,26 @@ async def read_root():
 async def connect(sid, environ):
     print(f"Client {sid} connected")
 
-
 @sio.event
 async def disconnect(sid):
     print(f"Client {sid} disconnected")
 
-
 @sio.event
 async def get_file(sid):
     try:
-        with open("src//test.xlsx", "rb") as file:
+        with open("src/test.xlsx", "rb") as file:
             file_content = file.read()
             encoded_content = base64.b64encode(file_content).decode('utf-8')
             await sio.emit('file_update', {'data': encoded_content}, room=sid)
     except FileNotFoundError:
         await sio.emit('error', {'message': 'File not found'}, room=sid)
 
-
 @sio.event
 async def file_update(sid, data):
     global current_file_buffer
     current_file_buffer = data['data']
     await sio.emit('file_update', {'data': current_file_buffer}, room=sid)
+
 
 
 def create_db_user(db: Session, user: UserCreate):  # Хэшируем пароль
@@ -195,70 +231,40 @@ async def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_
 
     raise HTTPException(status_code=404, detail="User not found")
 
-@app.get("/excel/{file_id}/history/")
-def get_file_history(file_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    file = db.query(ExcelFile).filter(ExcelFile.id == file_id).first()
-    if not file:
-        raise HTTPException(status_code=404, detail="File not found")
-    return file.history
+@app.get("/excel/excel", summary="Получение всех таблиц", tags=["Excel"])
+async def get_all_tables(current_user: str = Depends(get_current_user)):
+    """
+    Возвращает список всех таблиц.
+    """
+    return {"message": "Получение всех таблиц."}
 
-@app.delete("/excel/delete/{table_name}")
-async def delete_excel_table(table_name: str, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    # Ищем таблицу в базе данных
-    table = db.query(ExcelFile).filter(ExcelFile.file_name == table_name).first()
-    if not table:
-        return {"error": "Table not found"}
+@app.get("/excel/user", summary="История изменения", tags=["Excel"])
+async def get_all_tables(current_user: str = Depends(get_current_user)):
+    """
+    Посмотреть историю измнения файла.
+    """
+    return {"message": "Последний измененный файл пользователем","username пользователя" : current_user, "Последний измененный файл" : random.randint(0,99)}
 
-    # Удаляем таблицу
-    db.delete(table)
-    db.commit()
-    return {"message": f"Table '{table_name}' has been successfully deleted."}
+@app.post("/excel/", summary="Создание таблицы", tags=["Excel"])
+async def create_table(request_body: dict, current_user: str = Depends(get_current_user)):
+    """
+    Создает новую таблицу.
+    """
+    return {"message": "Создание таблицы.", "request_body": request_body}
 
+@app.put("/excel/{table_id}", summary="Обновление таблицы", tags=["Excel"])
+async def update_table(table_id: int, request_body: dict, current_user: str = Depends(get_current_user)):
+    """
+    Обновляет таблицу по ID.
+    """
+    return {"message": f"Обновление таблицы с ID {table_id}.", "request_body": request_body}
 
-@app.post("/excel/upload/")
-async def upload_excel(file: UploadFile, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    try:
-        content = await file.read()  # Чтение содержимого файла как байтов
-        base64_data = base64.b64encode(content).decode("utf-8")  # Преобразование в base64 строку
-
-        new_file = ExcelFile(
-            file_name=file.filename,
-            file_data=base64_data,
-            history=[{
-                "action": "created",
-                "user": current_user,
-                "timestamp": datetime.now().isoformat()
-            }]
-        )
-
-        db.add(new_file)
-        db.commit()
-        db.refresh(new_file)
-        return {"message": "File uploaded successfully", "file_id": new_file.id}
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error uploading file: {str(e)}")
-
-@app.get("/excel/download/{file_name}")
-async def download_excel(file_name: str, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    # Ищем файл в базе данных
-    file_record = db.query(ExcelFile).filter(ExcelFile.file_name == file_name).first()
-    if not file_record:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # Скачиваем файл с S3
-    try:
-        file_data = s3_client.get_object(Bucket="your-s3-bucket-name", Key=file_name)
-        file_content = file_data['Body'].read()
-
-        # Возвращаем файл как поток данных
-        file_stream = io.BytesIO(file_content)
-        response = StreamingResponse(file_stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        response.headers["Content-Disposition"] = f"attachment; filename={file_name}"
-
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+@app.delete("/excel/{table_id}", summary="Удаление таблицы", tags=["Excel"])
+async def delete_table(table_id: int, current_user: str = Depends(get_current_user)):
+    """
+    Удаляет таблицу по ID.
+    """
+    return {"message": f"Удаление таблицы с ID {table_id}."}
 
 @app.get("/users/{user_id}", response_model=UserResponse, summary="Получить пользователя")
 def read_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):

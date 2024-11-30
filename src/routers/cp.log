@@ -1,10 +1,8 @@
 INFO: Platform: win32
 INFO: Version Info: v0.3.0
 DEBUG: Log Path: cp.log
-DEBUG: command: ['python', 'E:\\Rinh Hackathon\\src\\routers\\auth.py']
+DEBUG: command: ['python', 'E:\\Rinh Hackathon\\src\\routers\\file_router.py']
 DEBUG: file: None
 DEBUG: pause: True
 DEBUG: repl: python
-DEBUG: args: ['E:\\Rinh Hackathon\\src\\routers\\auth.py']
-INFO: return code: 0 (0x0)
-INFO: elapsed time: 0.034098
+DEBUG: args: ['E:\\Rinh Hackathon\\src\\routers\\file_router.py']

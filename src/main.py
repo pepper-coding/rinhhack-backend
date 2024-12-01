@@ -47,20 +47,19 @@ engine = create_engine(DATABASE_URL)
 session = boto3.session.Session(
     aws_access_key_id=AWS_ACCESS_KEY_ID,
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-    region_name=REGION_NAME,  # Область для Yandex Cloud
+    region_name=REGION_NAME,
 )
 
-# Инициализируем клиент для работы с S3 в Yandex Cloud
+
 s3_client = session.client(
     service_name="s3",
-    endpoint_url=ENDPOINT_URL,  # URL для Yandex Cloud S3
+    endpoint_url=ENDPOINT_URL,
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 
-VERSION_TIME_THRESHOLD = 5  # 5 минут в секундах
-
+VERSION_TIME_THRESHOLD = 5 * 60
 def create_versioned_filename(filename: str, current_user: str) -> str:
     """
     Создает имя для версии файла, добавляя метку времени.
@@ -79,7 +78,7 @@ def should_create_new_version(last_modified_time: int) -> bool:
     current_time = int(time.time())
     return current_time - last_modified_time > VERSION_TIME_THRESHOLD
 
-# Функция для получения текущего пользователя из токена
+
 def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -92,7 +91,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         role: str = payload.get("role")
         if username is None:
             raise credentials_exception
-        return {"username": username, "role": role} # Возвращаем username как текущего пользователя
+        return {"username": username, "role": role}
     except:
         raise credentials_exception
 
@@ -209,25 +208,24 @@ async def connect(sid, environ):
     print(f"Client {sid} connected")
     auth_header = environ.get("HTTP_AUTHORIZATION")
     if auth_header:
-        # Заголовок должен быть вида 'Bearer <token>'
         token = auth_header.split(" ")[1] if auth_header.startswith("Bearer ") else None
 
         if token:
             try:
-                # Проверяем токен
+
                 user = get_current_user(token)
                 connected_users[sid] = user
             except HTTPException as e:
                 print(f"Authorization failed: {e.detail}")
-                await sio.disconnect(sid)  # Отключаем клиента, если токен невалиден
+                await sio.disconnect(sid)
                 return
         else:
             print("No Bearer token provided")
-            await sio.disconnect(sid)  # Отключаем клиента, если токен отсутствует
+            await sio.disconnect(sid)
             return
     else:
         print("Authorization header not found")
-        await sio.disconnect(sid)  # Отключаем клиента, если заголовок отсутствует
+        await sio.disconnect(sid)
         return
 @sio.event
 async def disconnect(sid):
@@ -236,9 +234,9 @@ async def disconnect(sid):
         del active_connections[sid]
 
 def get_file_from_storage(filename):
-    try:  # Укажите имя вашего бакета
+    try:
         response = s3_client.get_object(Bucket=BUCKET_NAME, Key=filename)
-        file_content = response['Body'].read()  # Читаем содержимое файла
+        file_content = response['Body'].read()
         return file_content
     except Exception as e:
         print(f"Ошибка при получении файла из S3: {e}")
@@ -246,8 +244,8 @@ def get_file_from_storage(filename):
 
 @sio.event
 async def get_file(sid, data):
-    filename = data.get('filename')  # Получаем имя файла из данных
-    active_connections[sid] = filename  # Сохраняем имя файла для этого клиента
+    filename = data.get('filename')
+    active_connections[sid] = filename
     print(active_connections)
     if filename is None:
         print(f"Ошибка: Имя файла не передано или оно пустое.")
@@ -257,14 +255,12 @@ async def get_file(sid, data):
     print(f"Получен запрос на файл: {filename}")
 
     try:
-        # Здесь замените на вашу логику получения файла
-        file_content = get_file_from_storage(filename)  # Получаем файл из хранилища
+        file_content = get_file_from_storage(filename)
 
         if file_content is None:
             print(f"Ошибка: Файл {filename} не найден.")
             await sio.emit('file_update', {'data': None}, room=sid)
         else:
-            # Кодируем файл в base64 перед отправкой
             encoded_file = base64.b64encode(file_content).decode('utf-8')
             await sio.emit('file_update', {'data': encoded_file}, room=sid)
     except Exception as e:
@@ -280,7 +276,6 @@ async def start_editing(sid, filename):
 async def stop_editing(sid, filename):
     print(f"Client {sid} stopped editing the file {filename}.")
     active_connections[sid] = {"file": filename, "status": None}
-    # После завершения редактирования отправляем обновленный файл всем остальным
     await send_updated_file_to_all_clients(filename, skip_sid=sid)
 
 
@@ -297,7 +292,7 @@ async def upload_file(sid, data):
 @app.get("/", summary="Проверка состояния сервера", response_description="Проверка состояния сервера")
 async def read_root():
     return {"status": "alive"}
-def create_db_user(db: Session, user: UserCreate):  # Хэшируем пароль
+def create_db_user(db: Session, user: UserCreate):
     db_user = User(
         first_name=user.first_name,
         last_name=user.last_name,
@@ -306,7 +301,7 @@ def create_db_user(db: Session, user: UserCreate):  # Хэшируем паро�
         position=user.position,
         department=user.department,
         username=user.username,
-        password_hash=user.password,  # Сохраняем хэшированный пароль
+        password_hash=user.password,
     )
 
     db.add(db_user)
@@ -317,7 +312,7 @@ def create_db_user(db: Session, user: UserCreate):  # Хэшируем паро�
 def decode_token(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        return payload.get("sub")  # Возвращаем имя пользователя из токена
+        return payload.get("sub")
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -433,14 +428,9 @@ async def delete_backup(folder_path: str, current_user: str = Depends(get_curren
         Удаляет все файлы в указанной папке (бэкапе).
         """
         try:
-            # Получаем все объекты в указанной папке
             response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=folder_path)
-
-            # Проверяем, если в папке есть файлы
             if 'Contents' not in response:
                 raise HTTPException(status_code=404, detail="Папка не найдена или пуста")
-
-            # Удаляем все файлы в указанной папке
             for obj in response['Contents']:
                 s3_client.delete_object(Bucket=BUCKET_NAME, Key=obj['Key'])
 
@@ -458,36 +448,26 @@ async def list_files(current_user: str = Depends(get_current_user)):
         Возвращает папки для всех бэкапов и все файлы, находящиеся в них.
         """
         try:
-            response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)  # Указание имени бакета
+            response = s3_client.list_objects_v2(Bucket=BUCKET_NAME) 
             backup_folders = {}
 
             for obj in response.get('Contents', []):
-                # Пропускаем файлы в корне, только если есть папка
                 if "/" not in obj['Key']:
-                    continue  # Пропускаем файлы, которые не находятся в папках
-                last_modified_utc = obj['LastModified']
-                last_modified_msk = last_modified_utc.astimezone(msk_timezone)
-                # Получаем имя папки (папка - это часть пути до файла)
-                folder_name = obj['Key'].split('/')[0]
+                    continue
 
-                # Создаем структуру для папки, если ее еще нет
+                folder_name = obj['Key'].split('/')[0]
                 if folder_name not in backup_folders:
                     backup_folders[folder_name] = []
-
-                # Генерация временной ссылки для скачивания файла (срок действия 1 час)
                 file_url = s3_client.generate_presigned_url('get_object',
                                                            Params={'Bucket': BUCKET_NAME, 'Key': obj['Key']},
-                                                           ExpiresIn=3600)  # Время действия ссылки в секундах (1 час)
-
-                # Добавляем файл в папку
+                                                           ExpiresIn=3600)
                 backup_folders[folder_name].append({
                     "name": obj["Key"],
                     "last_modified": last_modified_msk.strftime("%Y-%m-%d %H:%M:%S"),
                     "size": obj["Size"],
-                    "download_link": file_url  # Добавление ссылки на скачивание
+                    "download_link": file_url
                 })
 
-            # Формируем ответ, сгруппированный по папкам
             return {"backup_folders": [{"folder_name": folder, "files": files} for folder, files in backup_folders.items()]}
 
         except Exception as e:
@@ -503,24 +483,22 @@ async def list_files(current_user: str = Depends(get_current_user)):
     Возвращает список всех файлов в хранилище с ссылкой на скачивание, исключая файлы из папок.
     """
     try:
-        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)  # Указание имени бакета
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
         files = []
         for obj in response.get('Contents', []):
-            # Проверяем, что объект является файлом, а не папкой.
             if "/" in obj['Key']:
-                continue  # Пропускаем "папки" (они заканчиваются на '/')
+                continue
             last_modified_utc = obj['LastModified']
             last_modified_msk = last_modified_utc.astimezone(msk_timezone)
-            # Генерация временной ссылки для скачивания файла (срок действия 1 час)
             file_url = s3_client.generate_presigned_url('get_object',
                                                        Params={'Bucket': BUCKET_NAME, 'Key': obj['Key']},
-                                                       ExpiresIn=3600)  # Время действия ссылки в секундах (1 час)
+                                                       ExpiresIn=3600)
 
             files.append({
                 "name": obj["Key"],
                 "last_modified": last_modified_msk.strftime("%Y-%m-%d %H:%M:%S"),
                 "size": obj["Size"],
-                "download_link": file_url  # Добавление ссылки на скачивание
+                "download_link": file_url
             })
         return {"files": files}
 
@@ -528,19 +506,19 @@ async def list_files(current_user: str = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Ошибка при получении списка файлов: {e}")
 
 class RenameFileRequest(BaseModel):
-    old_key: str      # Старое имя файла
-    new_key: str      # Новое имя файла
+    old_key: str
+    new_key: str
 
 def rename_s3_object(old_key: str, new_key: str):
     try:
-        # Копирование файла с новым именем
+
         s3_client.copy_object(
             Bucket=BUCKET_NAME,
             CopySource={'Bucket': BUCKET_NAME, 'Key': old_key},
             Key=new_key
         )
 
-        # Удаление старого файла
+
         s3_client.delete_object(Bucket=BUCKET_NAME, Key=old_key)
 
     except Exception as e:
@@ -568,12 +546,10 @@ async def delete_file(filename: str, current_user: str = Depends(get_current_use
     Удаляет файл по названию из хранилища.
     """
     try:
-        # Сначала проверим, если ли версии файла
         response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=filename)
         if 'Contents' not in response:
             raise HTTPException(status_code=404, detail=f"Файл {filename} не найден.")
         else:
-            # Создаем версию файла
             versioned_filename = create_versioned_filename(filename, current_user)
             s3_client.copy_object(
                 Bucket=BUCKET_NAME,
@@ -596,17 +572,14 @@ async def create_excel_file(file_request: FileCreateRequest, current_user: str =
     """
     try:
         filename = file_request.filename
-        # Проверка, существует ли файл
         response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=filename)
         if 'Contents' in response:
             raise HTTPException(status_code=400, detail="Файл с таким именем уже существует.")
 
-        # Создаем новый пустой файл Excel
-        df = pd.DataFrame()  # Пустой DataFrame
+        df = pd.DataFrame()
         file_path = f"{filename}.xlsx"
         df.to_excel(file_path, index=False)
 
-        # Загружаем файл в S3
         s3_client.upload_file(file_path, BUCKET_NAME, filename)
         os.remove(file_path)
         return {"message": f"Файл {filename} успешно создан и загружен в хранилище."}
@@ -619,15 +592,12 @@ async def upload_file(file: UploadFile, current_user: str = Depends(get_current_
     Загрузка файла в хранилище с учетом версионности.
     """
     try:
-        # Проверка, существует ли файл с таким именем
         response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=file.filename)
         if 'Contents' in response:
-            # Проверяем, нужно ли создавать новую версию
             file_metadata = response['Contents'][0]
             last_modified = file_metadata['LastModified'].timestamp()
 
             if should_create_new_version(last_modified):
-                # Создаем версию файла
                 versioned_filename = create_versioned_filename(file.filename, current_user)
                 s3_client.copy_object(
                     Bucket=BUCKET_NAME,
@@ -641,7 +611,6 @@ async def upload_file(file: UploadFile, current_user: str = Depends(get_current_
                 s3_client.put_object(Bucket=BUCKET_NAME, Key=file.filename, Body=await file.read())
                 return {"message": f"Файл {file.filename} успешно обновлен."}
         else:
-            # Если файл не существует, просто загружаем его как новый
             s3_client.put_object(Bucket=BUCKET_NAME, Key=file.filename, Body=await file.read())
             return {"message": f"Файл {file.filename} успешно загружен."}
     except Exception as e:
@@ -660,9 +629,8 @@ def encode_file(file_content):
     return base64.b64encode(file_content).decode('utf-8')
 
 def save_file_to_s3(file_content, filename, sid):
-    # try:
+    try:
         user= connected_users[sid]
-        # current_user = Depends(get_current_user)
         response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=filename)
         if 'Contents' in response:
             file_metadata = response['Contents'][0]
@@ -685,27 +653,9 @@ def save_file_to_s3(file_content, filename, sid):
         else:
             s3_client.put_object(Bucket=BUCKET_NAME, Key=filename, Body=file_content)
             print(f"Файл {filename} успешно загружен на сервер.")
-    # except Exception as e:
-    #     print(f"Ошибка при сохранении файла: {e}")
+    except Exception as e:
+        print(f"Ошибка при сохранении файла: {e}")
 
-
-# @app.get("/excel/file/{filename}", summary="Получить файл по имени", tags=["Excel"])
-# async def get_excel_file(filename: str):
-#     """Получить файл по имени и отправить его через WebSocket."""
-#     try:
-#         # Проверяем, существует ли файл в хранилище (Yandex S3)
-#         file_obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=filename)
-#         file_content = file_obj['Body'].read()
-#
-#         # Кодируем файл в base64
-#         encoded_content = base64.b64encode(file_content).decode('utf-8')
-#
-#         # Отправляем файл через сокет
-#
-#         return {'data': encoded_content}
-#
-#     except Exception as e:
-#         raise HTTPException(status_code=404, detail="File not found")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

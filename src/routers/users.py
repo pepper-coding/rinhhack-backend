@@ -21,10 +21,11 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         username: str = payload.get("sub")
+        role: str = payload.get("role")
         if username is None:
             raise credentials_exception
-        return username  # Возвращаем username как текущего пользователя
-    except JWTError:
+        return {"username": username, "role": role} # Возвращаем username как текущего пользователя
+    except:
         raise credentials_exception
 
 
@@ -47,15 +48,18 @@ def get_users(db: Session, skip: int = 0):
 
 @router.get("/users", response_model=list[UserResponse], summary="Получить список всех пользователей")
 def read_users(skip: int = 0, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    users = get_users(db, skip=skip)
+    if current_user["role"]=="ADMIN":
+        users = get_users(db, skip=skip)
 
-    return [UserResponse(**{
-    "id": user.id,
-    "firstName": user.first_name,
-    "lastName": user.last_name,
-    "username": user.username,
-    "email": user.email,
-    "role": user.role,
-    "position": user.position,
-    "department": user.department,
-}) for user in users]
+        return [UserResponse(**{
+        "id": user.id,
+        "firstName": user.first_name,
+        "lastName": user.last_name,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "position": user.position,
+        "department": user.department,
+    }) for user in users]
+    else:
+        raise HTTPException(status_code=402, detail="Wrong role")

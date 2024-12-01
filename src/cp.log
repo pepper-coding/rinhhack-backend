@@ -7,4 +7,4 @@ DEBUG: pause: True
 DEBUG: repl: python
 DEBUG: args: ['E:\\Rinh Hackathon\\src\\main.py']
 INFO: return code: 1 (0x1)
-INFO: elapsed time: 0.462411
+INFO: elapsed time: 0.415072

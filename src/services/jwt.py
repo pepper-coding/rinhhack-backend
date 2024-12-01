@@ -12,7 +12,7 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 
 # Функция для создания access token
-def create_access_token(data: Dict, expires_delta: timedelta = timedelta(minutes=15)):
+def create_access_token(data: Dict, expires_delta: timedelta = timedelta(minutes=40)):
     to_encode = data.copy()
     expire = datetime.utcnow() + expires_delta
     to_encode.update({"exp": expire})

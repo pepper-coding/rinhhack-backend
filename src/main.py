@@ -16,6 +16,7 @@ import random
 from fastapi import UploadFile
 from src.models.schemas import ExcelFile, add_history_entry
 from datetime import datetime
+import time
 import socketio
 import uvicorn
 from fastapi.security import OAuth2PasswordBearer
@@ -29,10 +30,11 @@ from watchdog.events import FileSystemEventHandler
 import threading
 import pandas as pd
 import asyncio
+import pytz
 
 
 load_dotenv()
-
+msk_timezone = pytz.timezone('Europe/Moscow')
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -56,6 +58,27 @@ s3_client = session.client(
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
+
+VERSION_TIME_THRESHOLD = 5  # 5 минут в секундах
+
+def create_versioned_filename(filename: str, current_user: str) -> str:
+    """
+    Создает имя для версии файла, добавляя метку времени.
+    """
+    cur_user=current_user["username"]
+    cur_role=current_user["role"]
+    timestamp = datetime.now()
+    print(f"{filename.split('.')[0]}/{filename.split('.')[0]}_{timestamp} by {cur_user}_{cur_role}.xlsx")
+    return f"{filename.split('.')[0]}/{filename.split('.')[0]}_{timestamp} by {cur_user}_{cur_role}.xlsx"
+
+def should_create_new_version(last_modified_time: int) -> bool:
+    """
+    Проверяет, прошло ли более 5 минут с последнего изменения для создания новой версии.
+    """
+
+    current_time = int(time.time())
+    return current_time - last_modified_time > VERSION_TIME_THRESHOLD
+
 # Функция для получения текущего пользователя из токена
 def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
@@ -66,10 +89,11 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         username: str = payload.get("sub")
+        role: str = payload.get("role")
         if username is None:
             raise credentials_exception
-        return username  # Возвращаем username как текущего пользователя
-    except JWTError:
+        return {"username": username, "role": role} # Возвращаем username как текущего пользователя
+    except:
         raise credentials_exception
 
 
@@ -145,7 +169,7 @@ async def send_updated_file_to_all_clients(filename, skip_sid=None):
     if file_content:
         encoded_content = encode_file(file_content)
         for sid in active_connections:
-            if sid != skip_sid:  # Пропускаем клиента, который отправил файл
+            if sid != skip_sid:
                 await sio.emit('file_update', {'data': encoded_content, 'filename': filename}, room=sid)
 
 
@@ -179,18 +203,32 @@ def start_file_watcher():
 
 
 threading.Thread(target=start_file_watcher, daemon=True).start()
-
+connected_users = {}
 @sio.event
-async def connect(sid, environ, filename):
-    print(f"Client {sid} connected with file: {filename}")
-    active_connections[sid] = {'file': filename}  # Сохраняем имя файла для этого клиента
+async def connect(sid, environ):
+    print(f"Client {sid} connected")
+    auth_header = environ.get("HTTP_AUTHORIZATION")
+    if auth_header:
+        # Заголовок должен быть вида 'Bearer <token>'
+        token = auth_header.split(" ")[1] if auth_header.startswith("Bearer ") else None
 
-    # Загружаем файл из S3
-    file_content = read_file_from_s3(filename)
-
-    if file_content:
-        await sio.emit('file_update', {'data': encode_file(file_content), 'filename': filename}, room=sid)
-
+        if token:
+            try:
+                # Проверяем токен
+                user = get_current_user(token)
+                connected_users[sid] = user
+            except HTTPException as e:
+                print(f"Authorization failed: {e.detail}")
+                await sio.disconnect(sid)  # Отключаем клиента, если токен невалиден
+                return
+        else:
+            print("No Bearer token provided")
+            await sio.disconnect(sid)  # Отключаем клиента, если токен отсутствует
+            return
+    else:
+        print("Authorization header not found")
+        await sio.disconnect(sid)  # Отключаем клиента, если заголовок отсутствует
+        return
 @sio.event
 async def disconnect(sid):
     print(f"Client {sid} disconnected")
@@ -198,10 +236,8 @@ async def disconnect(sid):
         del active_connections[sid]
 
 def get_file_from_storage(filename):
-    try:
-        s3_client = boto3.client('s3')
-        bucket_name = BUCKET_NAME  # Укажите имя вашего бакета
-        response = s3_client.get_object(Bucket=bucket_name, Key=filename)
+    try:  # Укажите имя вашего бакета
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=filename)
         file_content = response['Body'].read()  # Читаем содержимое файла
         return file_content
     except Exception as e:
@@ -211,6 +247,8 @@ def get_file_from_storage(filename):
 @sio.event
 async def get_file(sid, data):
     filename = data.get('filename')  # Получаем имя файла из данных
+    active_connections[sid] = filename  # Сохраняем имя файла для этого клиента
+    print(active_connections)
     if filename is None:
         print(f"Ошибка: Имя файла не передано или оно пустое.")
         await sio.emit('file_update', {'data': None}, room=sid)
@@ -220,7 +258,7 @@ async def get_file(sid, data):
 
     try:
         # Здесь замените на вашу логику получения файла
-        file_content = await get_file_from_storage(filename)  # Получаем файл из хранилища
+        file_content = get_file_from_storage(filename)  # Получаем файл из хранилища
 
         if file_content is None:
             print(f"Ошибка: Файл {filename} не найден.")
@@ -248,14 +286,12 @@ async def stop_editing(sid, filename):
 
 @sio.event
 async def upload_file(sid, data):
-    # Декодируем файл, полученный от клиента
+
     file_data = base64.b64decode(data['data'])
-    filename = data['filename']  # Получаем имя файла, переданное с клиентом
+    filename = data['filename']
 
-    # Загружаем файл в хранилище S3
-    save_file_to_s3(file_data, filename)
+    save_file_to_s3(file_data, filename, sid)
 
-    # После загрузки отправляем обновленный файл всем подключенным клиентам
     await send_updated_file_to_all_clients(filename, skip_sid=sid)
 
 @app.get("/", summary="Проверка состояния сервера", response_description="Проверка состояния сервера")
@@ -285,7 +321,7 @@ def decode_token(token: str):
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-@app.get("/me", response_model=EmployeeResponse, summary="Получить данные о текущем пользователе", description="Этот эндпоинт возвращает данные о пользователе на основе переданного JWT токена.")
+@app.get("/me", response_model=EmployeeResponse, summary="Получить данные о текущем пользователе", description="Этот эндпоинт возвращает данные о пользователе на основе переданного JWT токена.", tags=["Users"])
 async def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     """
     Этот эндпоинт возвращает информацию о текущем пользователе, используя его токен.
@@ -306,47 +342,13 @@ async def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_
 
     raise HTTPException(status_code=404, detail="User not found")
 
-# @app.get("/excel/excel", summary="Получение всех таблиц", tags=["Excel"])
-# async def get_all_tables(current_user: str = Depends(get_current_user)):
-#     """
-#     Возвращает список всех таблиц.
-#     """
-#     return {"message": "Получение всех таблиц."}
-#
-# @app.get("/excel/user", summary="История изменения", tags=["Excel"])
-# async def get_all_tables(current_user: str = Depends(get_current_user)):
-#     """
-#     Посмотреть историю измнения файла.
-#     """
-#     return {"message": "Последний измененный файл пользователем","username пользователя" : current_user, "Последний измененный файл" : random.randint(0,99)}
-#
-# @app.post("/excel/", summary="Создание таблицы", tags=["Excel"])
-# async def create_table(request_body: dict, current_user: str = Depends(get_current_user)):
-#     """
-#     Создает новую таблицу.
-#     """
-#     return {"message": "Создание таблицы.", "request_body": request_body}
-#
-# @app.put("/excel/{table_id}", summary="Обновление таблицы", tags=["Excel"])
-# async def update_table(table_id: int, request_body: dict, current_user: str = Depends(get_current_user)):
-#     """
-#     Обновляет таблицу по ID.
-#     """
-#     return {"message": f"Обновление таблицы с ID {table_id}.", "request_body": request_body}
-#
-# @app.delete("/excel/{table_id}", summary="Удаление таблицы", tags=["Excel"])
-# async def delete_table(table_id: int, current_user: str = Depends(get_current_user)):
-#     """
-#     Удаляет таблицу по ID.
-#     """
-#     return {"message": f"Удаление таблицы с ID {table_id}."}
-
-@app.get("/users/{user_id}", response_model=UserResponse, summary="Получить пользователя")
+@app.get("/users/{user_id}", response_model=UserResponse, summary="Получить пользователя", tags=["Users"])
 def read_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return UserResponse(
+    if current_user["role"]=="ADMIN":
+        db_user = db.query(User).filter(User.id == user_id).first()
+        if db_user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        return UserResponse(
         id=db_user.id,
         firstName=db_user.first_name,
         lastName=db_user.last_name,
@@ -355,82 +357,210 @@ def read_user(user_id: int, db: Session = Depends(get_db), current_user: str = D
         role=db_user.role,
         position=db_user.position,
         department=db_user.department,
-    )
+        )
+    else:
+        raise HTTPException(status_code=402, detail="Wrong role")
 
-@app.post("/users/", response_model=UserResponse, summary="Создать нового пользователя")
+@app.post("/users/", response_model=UserResponse, summary="Создать нового пользователя", tags=["Users"])
 def create_user(user: UserCreate, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    db_user = create_db_user(db, user=user)
-    return UserResponse(
-        id=db_user.id,
-        firstName=db_user.first_name,
-        lastName=db_user.last_name,
-        username=db_user.username,
-        email=db_user.email,
-        role=db_user.role,
-        position=db_user.position,
-        department=db_user.department,
-    )
+    if current_user["role"]=="ADMIN":
+        db_user = create_db_user(db, user=user)
+        return UserResponse(
+            id=db_user.id,
+            firstName=db_user.first_name,
+            lastName=db_user.last_name,
+            username=db_user.username,
+            email=db_user.email,
+            role=db_user.role,
+            position=db_user.position,
+            department=db_user.department,
+        )
+    else:
+        raise HTTPException(status_code=402, detail="Wrong role")
 
-@app.put("/users/{user_id}", response_model=UserResponse, summary="Обновить пользователя")
+@app.put("/users/{user_id}", response_model=UserResponse, summary="Обновить пользователя", tags=["Users"])
 def update_user(user_id: int, user: UserCreate, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    db_user.first_name = user.first_name
-    db_user.last_name = user.last_name
-    db_user.email = user.email
-    db_user.role = user.role
-    db_user.position = user.position
-    db_user.department = user.department
-    db.commit()
-    db.refresh(db_user)
-    return UserResponse(
-        id=db_user.id,
-        firstName=db_user.first_name,
-        lastName=db_user.last_name,
-        username=db_user.username,
-        email=db_user.email,
-        role=db_user.role,
-        position=db_user.position,
-        department=db_user.department,
-    )
+    if current_user["role"]=="ADMIN":
+        db_user = db.query(User).filter(User.id == user_id).first()
+        if db_user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        db_user.first_name = user.first_name
+        db_user.last_name = user.last_name
+        db_user.email = user.email
+        db_user.role = user.role
+        db_user.position = user.position
+        db_user.department = user.department
+        db.commit()
+        db.refresh(db_user)
+        return UserResponse(
+            id=db_user.id,
+            firstName=db_user.first_name,
+            lastName=db_user.last_name,
+            username=db_user.username,
+            email=db_user.email,
+            role=db_user.role,
+            position=db_user.position,
+            department=db_user.department,
+        )
+    else:
+        raise HTTPException(status_code=402, detail="Wrong role")
 
-@app.delete("/users/{user_id}", response_model=UserResponse, summary="Удалить пользователя")
+@app.delete("/users/{user_id}", response_model=UserResponse, summary="Удалить пользователя", tags=["Users"])
 def delete_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    db.delete(db_user)
-    db.commit()
-    return UserResponse(
-        id=db_user.id,
-        firstName=db_user.first_name,
-        lastName=db_user.last_name,
-        username=db_user.username,
-        email=db_user.email,
-        role=db_user.role,
-        position=db_user.position,
-        department=db_user.department,
-    )
+    if current_user["role"]=="ADMIN":
+        db_user = db.query(User).filter(User.id == user_id).first()
+        if db_user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        db.delete(db_user)
+        db.commit()
+        return UserResponse(
+            id=db_user.id,
+            firstName=db_user.first_name,
+            lastName=db_user.last_name,
+            username=db_user.username,
+            email=db_user.email,
+            role=db_user.role,
+            position=db_user.position,
+            department=db_user.department,
+        )
+    else:
+        raise HTTPException(status_code=402, detail="Wrong role")
+
+@app.delete("/excel/backup_files", summary="Удалить ПАПКУ бэкапа по пути", tags=["Excel"])
+async def delete_backup(folder_path: str, current_user: str = Depends(get_current_user)):
+    if current_user["role"] == "ADMIN":
+        """
+        Удаляет все файлы в указанной папке (бэкапе).
+        """
+        try:
+            # Получаем все объекты в указанной папке
+            response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=folder_path)
+
+            # Проверяем, если в папке есть файлы
+            if 'Contents' not in response:
+                raise HTTPException(status_code=404, detail="Папка не найдена или пуста")
+
+            # Удаляем все файлы в указанной папке
+            for obj in response['Contents']:
+                s3_client.delete_object(Bucket=BUCKET_NAME, Key=obj['Key'])
+
+            return {"message": f"Бэкап '{folder_path}' успешно удален."}
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка при удалении бэкапа: {e}")
+    else:
+        raise HTTPException(status_code=403, detail="Недостаточно прав для удаления бэкапа")
+
+@app.get("/excel/backup_files", summary="Получить бэкапы файлов", tags=["Excel"])
+async def list_files(current_user: str = Depends(get_current_user)):
+    if current_user["role"] == "ADMIN":
+        """
+        Возвращает папки для всех бэкапов и все файлы, находящиеся в них.
+        """
+        try:
+            response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)  # Указание имени бакета
+            backup_folders = {}
+
+            for obj in response.get('Contents', []):
+                # Пропускаем файлы в корне, только если есть папка
+                if "/" not in obj['Key']:
+                    continue  # Пропускаем файлы, которые не находятся в папках
+                last_modified_utc = obj['LastModified']
+                last_modified_msk = last_modified_utc.astimezone(msk_timezone)
+                # Получаем имя папки (папка - это часть пути до файла)
+                folder_name = obj['Key'].split('/')[0]
+
+                # Создаем структуру для папки, если ее еще нет
+                if folder_name not in backup_folders:
+                    backup_folders[folder_name] = []
+
+                # Генерация временной ссылки для скачивания файла (срок действия 1 час)
+                file_url = s3_client.generate_presigned_url('get_object',
+                                                           Params={'Bucket': BUCKET_NAME, 'Key': obj['Key']},
+                                                           ExpiresIn=3600)  # Время действия ссылки в секундах (1 час)
+
+                # Добавляем файл в папку
+                backup_folders[folder_name].append({
+                    "name": obj["Key"],
+                    "last_modified": last_modified_msk.strftime("%Y-%m-%d %H:%M:%S"),
+                    "size": obj["Size"],
+                    "download_link": file_url  # Добавление ссылки на скачивание
+                })
+
+            # Формируем ответ, сгруппированный по папкам
+            return {"backup_folders": [{"folder_name": folder, "files": files} for folder, files in backup_folders.items()]}
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка при получении списка файлов: {e}")
+    else:
+        raise HTTPException(status_code=402, detail="Wrong role")
+
 
 
 @app.get("/excel/files", summary="Получить список всех файлов", tags=["Excel"])
 async def list_files(current_user: str = Depends(get_current_user)):
     """
-    Возвращает список всех файлов в хранилище.
+    Возвращает список всех файлов в хранилище с ссылкой на скачивание, исключая файлы из папок.
     """
     try:
-        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)  # Укажи имя своего бакета
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)  # Указание имени бакета
         files = []
         for obj in response.get('Contents', []):
+            # Проверяем, что объект является файлом, а не папкой.
+            if "/" in obj['Key']:
+                continue  # Пропускаем "папки" (они заканчиваются на '/')
+            last_modified_utc = obj['LastModified']
+            last_modified_msk = last_modified_utc.astimezone(msk_timezone)
+            # Генерация временной ссылки для скачивания файла (срок действия 1 час)
+            file_url = s3_client.generate_presigned_url('get_object',
+                                                       Params={'Bucket': BUCKET_NAME, 'Key': obj['Key']},
+                                                       ExpiresIn=3600)  # Время действия ссылки в секундах (1 час)
+
             files.append({
                 "name": obj["Key"],
-                "last_modified": obj["LastModified"].strftime("%Y-%m-%d %H:%M:%S"),
-                "size": obj["Size"]
+                "last_modified": last_modified_msk.strftime("%Y-%m-%d %H:%M:%S"),
+                "size": obj["Size"],
+                "download_link": file_url  # Добавление ссылки на скачивание
             })
         return {"files": files}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка при получении списка файлов: {e}")
+
+class RenameFileRequest(BaseModel):
+    old_key: str      # Старое имя файла
+    new_key: str      # Новое имя файла
+
+def rename_s3_object(old_key: str, new_key: str):
+    try:
+        # Копирование файла с новым именем
+        s3_client.copy_object(
+            Bucket=BUCKET_NAME,
+            CopySource={'Bucket': BUCKET_NAME, 'Key': old_key},
+            Key=new_key
+        )
+
+        # Удаление старого файла
+        s3_client.delete_object(Bucket=BUCKET_NAME, Key=old_key)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка при переименовании файла: {e}")
+
+@app.post("/excel/rename_file", summary="Переименовать файл", tags=["Excel"])
+async def rename_file(request: RenameFileRequest, current_user: str = Depends(get_current_user)):
+    """
+    Переименовывает файл в S3 хранилище.
+
+    - **old_key**: старое имя файла в S3
+    - **new_key**: новое имя файла в S3
+
+    Ожидается, что файл существует в S3. После успешного выполнения старое имя файла будет удалено.
+    Если файла не существует - 500
+    """
+    rename_s3_object(request.old_key, request.new_key)
+    return {"message": f"Файл переименован с {request.old_key} на {request.new_key}"}
+
+
 
 @app.delete("/excel/delete/{filename}", summary="Удалить файл по названию", tags=["Excel"])
 async def delete_file(filename: str, current_user: str = Depends(get_current_user)):
@@ -438,8 +568,21 @@ async def delete_file(filename: str, current_user: str = Depends(get_current_use
     Удаляет файл по названию из хранилища.
     """
     try:
-        s3_client.delete_object(Bucket=BUCKET_NAME, Key=filename)
-        return {"message": f"Файл {filename} успешно удален."}
+        # Сначала проверим, если ли версии файла
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=filename)
+        if 'Contents' not in response:
+            raise HTTPException(status_code=404, detail=f"Файл {filename} не найден.")
+        else:
+            # Создаем версию файла
+            versioned_filename = create_versioned_filename(filename, current_user)
+            s3_client.copy_object(
+                Bucket=BUCKET_NAME,
+                CopySource={'Bucket': BUCKET_NAME, 'Key': filename},
+                Key=versioned_filename
+            )
+            s3_client.delete_object(Bucket=BUCKET_NAME, Key=filename)
+
+        return {"message": f"Файл был удален."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка при удалении файла: {e}")
 
@@ -473,12 +616,34 @@ async def create_excel_file(file_request: FileCreateRequest, current_user: str =
 @app.post("/excel/upload", summary="Загрузить файл в хранилище", tags=["Excel"])
 async def upload_file(file: UploadFile, current_user: str = Depends(get_current_user)):
     """
-    Загрузка файла в хранилище.
+    Загрузка файла в хранилище с учетом версионности.
     """
     try:
-        file_content = await file.read()  # Чтение содержимого файла
-        s3_client.put_object(Bucket=BUCKET_NAME, Key=file.filename, Body=file_content)
-        return {"message": f"Файл {file.filename} успешно загружен."}
+        # Проверка, существует ли файл с таким именем
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=file.filename)
+        if 'Contents' in response:
+            # Проверяем, нужно ли создавать новую версию
+            file_metadata = response['Contents'][0]
+            last_modified = file_metadata['LastModified'].timestamp()
+
+            if should_create_new_version(last_modified):
+                # Создаем версию файла
+                versioned_filename = create_versioned_filename(file.filename, current_user)
+                s3_client.copy_object(
+                    Bucket=BUCKET_NAME,
+                    CopySource={'Bucket': BUCKET_NAME, 'Key': file.filename},
+                    Key=versioned_filename
+                )
+                s3_client.delete_object(Bucket=BUCKET_NAME, Key=file.filename)
+                s3_client.put_object(Bucket=BUCKET_NAME, Key=file.filename, Body=await file.read())
+                return {"message": f"Файл {file.filename} загружен как новая версия."}
+            else:
+                s3_client.put_object(Bucket=BUCKET_NAME, Key=file.filename, Body=await file.read())
+                return {"message": f"Файл {file.filename} успешно обновлен."}
+        else:
+            # Если файл не существует, просто загружаем его как новый
+            s3_client.put_object(Bucket=BUCKET_NAME, Key=file.filename, Body=await file.read())
+            return {"message": f"Файл {file.filename} успешно загружен."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка при загрузке файла: {e}")
 
@@ -494,32 +659,53 @@ def read_file_from_s3(filename):
 def encode_file(file_content):
     return base64.b64encode(file_content).decode('utf-8')
 
-def save_file_to_s3(file_content, filename):
-    try:
-        s3_client.put_object(Bucket=BUCKET_NAME, Key=filename, Body=file_content)
-        print(f"Файл {filename} успешно загружен на сервер.")
-    except Exception as e:
-        print(f"Ошибка при сохранении файла: {e}")
+def save_file_to_s3(file_content, filename, sid):
+    # try:
+        user= connected_users[sid]
+        # current_user = Depends(get_current_user)
+        response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=filename)
+        if 'Contents' in response:
+            file_metadata = response['Contents'][0]
+            last_modified = file_metadata['LastModified'].timestamp()
+            print(last_modified)
+            if should_create_new_version(last_modified):
+                versioned_filename = create_versioned_filename(filename, user)
+                print(versioned_filename)
+                s3_client.copy_object(
+                    Bucket=BUCKET_NAME,
+                    CopySource={'Bucket': BUCKET_NAME, 'Key': filename},
+                    Key=versioned_filename
+                )
+                s3_client.delete_object(Bucket=BUCKET_NAME, Key=filename)
+                s3_client.put_object(Bucket=BUCKET_NAME, Key=filename, Body=file_content)
+                return {"message": f"Файл {filename} загружен как новая версия."}
+            else:
+                s3_client.put_object(Bucket=BUCKET_NAME, Key=filename, Body=file_content)
+                return {"message": f"Файл {filename} успешно обновлен."}
+        else:
+            s3_client.put_object(Bucket=BUCKET_NAME, Key=filename, Body=file_content)
+            print(f"Файл {filename} успешно загружен на сервер.")
+    # except Exception as e:
+    #     print(f"Ошибка при сохранении файла: {e}")
 
 
-@app.get("/excel/file/{filename}", summary="Получить файл по имени", tags=["Excel"])
-async def get_excel_file(filename: str, websocket: WebSocket):
-    """Получить файл по имени и отправить его через WebSocket."""
-    try:
-        # Проверяем, существует ли файл в хранилище (Yandex S3)
-        file_obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=filename)
-        file_content = file_obj['Body'].read()
-
-        # Кодируем файл в base64
-        encoded_content = base64.b64encode(file_content).decode('utf-8')
-
-        # Отправляем файл через сокет
-        await websocket.send_json({'filename': filename, 'data': encoded_content})
-
-        return {"message": f"Файл {filename} отправлен на сокет."}
-
-    except Exception as e:
-        raise HTTPException(status_code=404, detail="File not found")
+# @app.get("/excel/file/{filename}", summary="Получить файл по имени", tags=["Excel"])
+# async def get_excel_file(filename: str):
+#     """Получить файл по имени и отправить его через WebSocket."""
+#     try:
+#         # Проверяем, существует ли файл в хранилище (Yandex S3)
+#         file_obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=filename)
+#         file_content = file_obj['Body'].read()
+#
+#         # Кодируем файл в base64
+#         encoded_content = base64.b64encode(file_content).decode('utf-8')
+#
+#         # Отправляем файл через сокет
+#
+#         return {'data': encoded_content}
+#
+#     except Exception as e:
+#         raise HTTPException(status_code=404, detail="File not found")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

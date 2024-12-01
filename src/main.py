@@ -169,6 +169,20 @@ async def send_updated_file_to_all_clients(filename, skip_sid=None):
         for sid in active_connections:
             if sid != skip_sid:
                 await sio.emit('file_update', {'data': encoded_content, 'filename': filename}, room=sid)
+class FileChangeHandler(FileSystemEventHandler):
+    def on_modified(self, event):
+        print(f"Файл {event.src_path} изменен.")
+        self.trigger_send_file_update(event.src_path)
+
+    def on_created(self, event):
+        if not event.is_directory:
+            print(f"Файл создан: {event.src_path}")
+            self.trigger_send_file_update(event.src_path)
+
+    def trigger_send_file_update(self, file_path):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(send_updated_file_to_all_clients(file_path, None))
 
 def start_file_watcher():
     event_handler = FileChangeHandler()

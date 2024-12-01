@@ -59,7 +59,7 @@ s3_client = session.client(
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 
-VERSION_TIME_THRESHOLD = 5 * 60
+VERSION_TIME_THRESHOLD = 60
 def create_versioned_filename(filename: str, current_user: str) -> str:
     """
     Создает имя для версии файла, добавляя метку времени.
@@ -67,7 +67,6 @@ def create_versioned_filename(filename: str, current_user: str) -> str:
     cur_user=current_user["username"]
     cur_role=current_user["role"]
     timestamp = datetime.now()
-    print(f"{filename.split('.')[0]}/{filename.split('.')[0]}_{timestamp} by {cur_user}_{cur_role}.xlsx")
     return f"{filename.split('.')[0]}/{filename.split('.')[0]}_{timestamp} by {cur_user}_{cur_role}.xlsx"
 
 def should_create_new_version(last_modified_time: int) -> bool:
@@ -171,23 +170,6 @@ async def send_updated_file_to_all_clients(filename, skip_sid=None):
             if sid != skip_sid:
                 await sio.emit('file_update', {'data': encoded_content, 'filename': filename}, room=sid)
 
-
-
-class FileChangeHandler(FileSystemEventHandler):
-    def on_modified(self, event):
-        print(f"Файл {event.src_path} изменен.")
-        self.trigger_send_file_update(event.src_path)
-
-    def on_created(self, event):
-        if not event.is_directory:
-            print(f"Файл создан: {event.src_path}")
-            self.trigger_send_file_update(event.src_path)
-
-    def trigger_send_file_update(self, file_path):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(send_updated_file_to_all_clients(file_path, None))
-
 def start_file_watcher():
     event_handler = FileChangeHandler()
     observer = Observer()
@@ -204,15 +186,14 @@ def start_file_watcher():
 threading.Thread(target=start_file_watcher, daemon=True).start()
 connected_users = {}
 @sio.event
-async def connect(sid, environ):
+async def connect(sid, environ, auth):
     print(f"Client {sid} connected")
-    auth_header = environ.get("HTTP_AUTHORIZATION")
+    auth_header = auth.get("token")
     if auth_header:
         token = auth_header.split(" ")[1] if auth_header.startswith("Bearer ") else None
 
         if token:
             try:
-
                 user = get_current_user(token)
                 connected_users[sid] = user
             except HTTPException as e:
@@ -232,6 +213,7 @@ async def disconnect(sid):
     print(f"Client {sid} disconnected")
     if sid in active_connections:
         del active_connections[sid]
+        del connected_users[sid]
 
 def get_file_from_storage(filename):
     try:
@@ -246,7 +228,6 @@ def get_file_from_storage(filename):
 async def get_file(sid, data):
     filename = data.get('filename')
     active_connections[sid] = filename
-    print(active_connections)
     if filename is None:
         print(f"Ошибка: Имя файла не передано или оно пустое.")
         await sio.emit('file_update', {'data': None}, room=sid)
@@ -337,7 +318,7 @@ async def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_
 
     raise HTTPException(status_code=404, detail="User not found")
 
-@app.get("/users/{user_id}", response_model=UserResponse, summary="Получить пользователя", tags=["Users"])
+@app.get("/users/{user_id}", response_model=UserResponse, summary="Получить пользователя. Нужна роль ADMIN", tags=["Users"])
 def read_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
     if current_user["role"]=="ADMIN":
         db_user = db.query(User).filter(User.id == user_id).first()
@@ -356,7 +337,7 @@ def read_user(user_id: int, db: Session = Depends(get_db), current_user: str = D
     else:
         raise HTTPException(status_code=402, detail="Wrong role")
 
-@app.post("/users/", response_model=UserResponse, summary="Создать нового пользователя", tags=["Users"])
+@app.post("/users/", response_model=UserResponse, summary="Создать нового пользователя. Нужна роль ADMIN", tags=["Users"])
 def create_user(user: UserCreate, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
     if current_user["role"]=="ADMIN":
         db_user = create_db_user(db, user=user)
@@ -373,7 +354,7 @@ def create_user(user: UserCreate, db: Session = Depends(get_db), current_user: s
     else:
         raise HTTPException(status_code=402, detail="Wrong role")
 
-@app.put("/users/{user_id}", response_model=UserResponse, summary="Обновить пользователя", tags=["Users"])
+@app.put("/users/{user_id}", response_model=UserResponse, summary="Обновить пользователя. Нужна роль ADMIN", tags=["Users"])
 def update_user(user_id: int, user: UserCreate, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
     if current_user["role"]=="ADMIN":
         db_user = db.query(User).filter(User.id == user_id).first()
@@ -400,7 +381,7 @@ def update_user(user_id: int, user: UserCreate, db: Session = Depends(get_db), c
     else:
         raise HTTPException(status_code=402, detail="Wrong role")
 
-@app.delete("/users/{user_id}", response_model=UserResponse, summary="Удалить пользователя", tags=["Users"])
+@app.delete("/users/{user_id}", response_model=UserResponse, summary="Удалить пользователя. Нужна роль ADMIN", tags=["Users"])
 def delete_user(user_id: int, db: Session = Depends(get_db), current_user: str = Depends(get_current_user)):
     if current_user["role"]=="ADMIN":
         db_user = db.query(User).filter(User.id == user_id).first()
@@ -421,7 +402,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db), current_user: str =
     else:
         raise HTTPException(status_code=402, detail="Wrong role")
 
-@app.delete("/excel/backup_files", summary="Удалить ПАПКУ бэкапа по пути", tags=["Excel"])
+@app.delete("/excel/backup_files", summary="Удалить ПАПКУ бэкапа по пути. Нужна роль ADMIN", tags=["Excel"])
 async def delete_backup(folder_path: str, current_user: str = Depends(get_current_user)):
     if current_user["role"] == "ADMIN":
         """
@@ -441,14 +422,14 @@ async def delete_backup(folder_path: str, current_user: str = Depends(get_curren
     else:
         raise HTTPException(status_code=403, detail="Недостаточно прав для удаления бэкапа")
 
-@app.get("/excel/backup_files", summary="Получить бэкапы файлов", tags=["Excel"])
+@app.get("/excel/backup_files", summary="Получить бэкапы файлов. Нужна роль ADMIN", tags=["Excel"])
 async def list_files(current_user: str = Depends(get_current_user)):
     if current_user["role"] == "ADMIN":
         """
         Возвращает папки для всех бэкапов и все файлы, находящиеся в них.
         """
         try:
-            response = s3_client.list_objects_v2(Bucket=BUCKET_NAME) 
+            response = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
             backup_folders = {}
 
             for obj in response.get('Contents', []):
@@ -458,6 +439,8 @@ async def list_files(current_user: str = Depends(get_current_user)):
                 folder_name = obj['Key'].split('/')[0]
                 if folder_name not in backup_folders:
                     backup_folders[folder_name] = []
+                last_modified_utc = obj['LastModified']
+                last_modified_msk = last_modified_utc.astimezone(msk_timezone)
                 file_url = s3_client.generate_presigned_url('get_object',
                                                            Params={'Bucket': BUCKET_NAME, 'Key': obj['Key']},
                                                            ExpiresIn=3600)
@@ -635,10 +618,8 @@ def save_file_to_s3(file_content, filename, sid):
         if 'Contents' in response:
             file_metadata = response['Contents'][0]
             last_modified = file_metadata['LastModified'].timestamp()
-            print(last_modified)
             if should_create_new_version(last_modified):
                 versioned_filename = create_versioned_filename(filename, user)
-                print(versioned_filename)
                 s3_client.copy_object(
                     Bucket=BUCKET_NAME,
                     CopySource={'Bucket': BUCKET_NAME, 'Key': filename},

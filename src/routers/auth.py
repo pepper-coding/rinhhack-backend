@@ -26,18 +26,6 @@ class Employee(BaseModel):
     department: str
 
 
-def generate_random_employee() -> Employee:
-    employee = Employee(
-        id=fake.uuid4(),
-        firstName=fake.first_name(),
-        lastName=fake.last_name(),
-        email=fake.email(),
-        role="ADMIN",
-        position=fake.job(),
-        department=fake.company()
-    )
-    return employee
-
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
@@ -72,8 +60,8 @@ async def login(auth_request: AuthRequest, db: Session = Depends(get_db)):
 
     if user and verify_password(auth_request.password, user.password_hash):
         # Создание токенов
-        access_token = create_access_token({"sub": auth_request.username})
-        refresh_token = create_refresh_token({"sub": auth_request.username})
+        access_token = create_access_token({"sub": auth_request.username, "role":user.role})
+        refresh_token = create_refresh_token({"sub": auth_request.username, "role":user.role})
 
         # Возвращаем данные сотрудника из базы данных
         employee = {
